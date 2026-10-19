@@ -1,0 +1,393 @@
+name: Build Shufl APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.6'
+
+      - name: Generate Project Files Automatically
+        run: |
+          mkdir -p app/src/main/java/com/example/shuflclone
+
+          cat << 'EOF' > gradle.properties
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2048m
+          EOF
+
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ShuflFM"
+          include(":app")
+          EOF
+
+          cat << 'EOF' > app/build.gradle.kts
+          plugins {
+              id("com.android.application") version "8.2.2"
+              id("org.jetbrains.kotlin.android") version "1.9.22"
+          }
+          android {
+              namespace = "com.example.shuflclone"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.shuflclone"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.10" }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              val composeBom = platform("androidx.compose:compose-bom:2024.02.00")
+              implementation(composeBom)
+              implementation("androidx.activity:activity-compose:1.8.2")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.core:core-ktx:1.12.0")
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+              <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+              <application
+                  android:allowBackup="true"
+                  android:label="Shufl FM"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/example/shuflclone/MainActivity.kt
+          package com.example.shuflclone
+
+          import android.Manifest
+          import android.content.ContentUris
+          import android.content.Context
+          import android.content.pm.PackageManager
+          import android.media.MediaMetadataRetriever
+          import android.media.MediaPlayer
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.MediaStore
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.compose.setContent
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.gestures.detectDragGestures
+          import androidx.compose.foundation.gestures.detectTapGestures
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.draw.shadow
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.layout.onSizeChanged
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.platform.LocalHapticFeedback
+          import androidx.compose.ui.text.font.FontFamily
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.core.content.ContextCompat
+          import kotlinx.coroutines.delay
+          import kotlin.math.atan2
+
+          data class Track(val title: String, val artist: String, val uri: Uri)
+          enum class ScreenState { MAIN_MENU, SONG_LIST, NOW_PLAYING, ABOUT }
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent {
+                      MaterialTheme {
+                          Surface(modifier = Modifier.fillMaxSize()) {
+                              ShuflPodApp()
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun ShuflPodApp() {
+              val context = LocalContext.current
+              val haptic = LocalHapticFeedback.current
+              var currentScreen by remember { mutableStateOf(ScreenState.MAIN_MENU) }
+              var menuIndex by remember { mutableStateOf(0) }
+              var songIndex by remember { mutableStateOf(0) }
+              var tracks by remember { mutableStateOf(listOf<Track>()) }
+              val mediaPlayer = remember { MediaPlayer() }
+              var currentTrack by remember { mutableStateOf<Track?>(null) }
+              var isPlaying by remember { mutableStateOf(false) }
+              var progress by remember { mutableStateOf(0f) }
+
+              val mainMenuOptions = listOf(
+                  "Now Playing",
+                  "Songs (${tracks.size})",
+                  "Shuffle Songs",
+                  "Import Audio Files",
+                  "Scan Device Music",
+                  "About Shufl"
+              )
+
+              val filePicker = rememberLauncherForActivityResult(
+                  contract = ActivityResultContracts.OpenMultipleDocuments()
+              ) { uris ->
+                  if (uris.isNotEmpty()) {
+                      val imported = uris.mapIndexed { idx, uri ->
+                          val retriever = MediaMetadataRetriever()
+                          var title = "Imported Track ${idx + 1}"
+                          var artist = "Local File"
+                          try {
+                              retriever.setDataSource(context, uri)
+                              retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.let { title = it }
+                              retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)?.let { artist = it }
+                          } catch (_: Exception) {}
+                          retriever.release()
+                          Track(title, artist, uri)
+                      }
+                      tracks = tracks + imported
+                  }
+              }
+
+              val permissionLauncher = rememberLauncherForActivityResult(
+                  contract = ActivityResultContracts.RequestPermission()
+              ) { granted ->
+                  if (granted) tracks = scanDeviceMusic(context)
+              }
+
+              fun playTrack(track: Track) {
+                  try {
+                      mediaPlayer.reset()
+                      mediaPlayer.setDataSource(context, track.uri)
+                      mediaPlayer.prepare()
+                      mediaPlayer.start()
+                      currentTrack = track
+                      isPlaying = true
+                      currentScreen = ScreenState.NOW_PLAYING
+                      mediaPlayer.setOnCompletionListener {
+                          val nextIdx = (tracks.indexOf(track) + 1) % tracks.size.coerceAtLeast(1)
+                          if (tracks.isNotEmpty()) playTrack(tracks[nextIdx])
+                      }
+                  } catch (e: Exception) { e.printStackTrace() }
+              }
+
+              LaunchedEffect(isPlaying, currentTrack) {
+                  while (isPlaying) {
+                      if (mediaPlayer.isPlaying && mediaPlayer.duration > 0) {
+                          progress = mediaPlayer.currentPosition.toFloat() / mediaPlayer.duration.toFloat()
+                      }
+                      delay(500)
+                  }
+              }
+
+              DisposableEffect(Unit) { onDispose { mediaPlayer.release() } }
+
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .background(Brush.verticalGradient(listOf(Color(0xFFD8D8D8), Color(0xFFB8B8B8), Color(0xFF9E9E9E))))
+                      .padding(horizontal = 24.dp, vertical = 36.dp),
+                  horizontalAlignment = Alignment.CenterHorizontally,
+                  verticalArrangement = Arrangement.SpaceBetween
+              ) {
+                  IPodLcdScreen(
+                      modifier = Modifier.fillMaxWidth().weight(0.46f),
+                      currentScreen = currentScreen,
+                      mainMenuOptions = mainMenuOptions,
+                      menuIndex = menuIndex,
+                      tracks = tracks,
+                      songIndex = songIndex,
+                      currentTrack = currentTrack,
+                      isPlaying = isPlaying,
+                      progress = progress
+                  )
+                  Spacer(modifier = Modifier.height(28.dp))
+                  Box(modifier = Modifier.fillMaxWidth().weight(0.54f), contentAlignment = Alignment.Center) {
+                      RotaryClickWheel(
+                          onScroll = { delta ->
+                              haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                              when (currentScreen) {
+                                  ScreenState.MAIN_MENU -> menuIndex = (menuIndex + delta).coerceIn(0, mainMenuOptions.lastIndex)
+                                  ScreenState.SONG_LIST -> if (tracks.isNotEmpty()) songIndex = (songIndex + delta).coerceIn(0, tracks.lastIndex)
+                                  else -> {}
+                              }
+                          },
+                          onCenterClick = {
+                              haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                              when (currentScreen) {
+                                  ScreenState.MAIN_MENU -> when (menuIndex) {
+                                      0 -> currentScreen = ScreenState.NOW_PLAYING
+                                      1 -> currentScreen = ScreenState.SONG_LIST
+                                      2 -> if (tracks.isNotEmpty()) playTrack(tracks.random())
+                                      3 -> filePicker.launch(arrayOf("audio/*"))
+                                      4 -> {
+                                          val perm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
+                                          if (ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED) tracks = scanDeviceMusic(context) else permissionLauncher.launch(perm)
+                                      }
+                                      5 -> currentScreen = ScreenState.ABOUT
+                                  }
+                                  ScreenState.SONG_LIST -> if (tracks.isNotEmpty()) playTrack(tracks[songIndex])
+                                  ScreenState.NOW_PLAYING -> if (currentTrack != null) {
+                                      if (mediaPlayer.isPlaying) { mediaPlayer.pause(); isPlaying = false } else { mediaPlayer.start(); isPlaying = true }
+                                  }
+                                  ScreenState.ABOUT -> currentScreen = ScreenState.MAIN_MENU
+                              }
+                          },
+                          onMenuClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); currentScreen = ScreenState.MAIN_MENU },
+                          onPlayPauseClick = {
+                              haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                              if (currentTrack != null) {
+                                  if (mediaPlayer.isPlaying) { mediaPlayer.pause(); isPlaying = false } else { mediaPlayer.start(); isPlaying = true }
+                              }
+                          },
+                          onNextClick = {
+                              haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                              if (tracks.isNotEmpty() && currentTrack != null) playTrack(tracks[(tracks.indexOf(currentTrack) + 1) % tracks.size])
+                          },
+                          onPrevClick = {
+                              haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                              if (tracks.isNotEmpty() && currentTrack != null) {
+                                  val prev = if (tracks.indexOf(currentTrack) - 1 < 0) tracks.lastIndex else tracks.indexOf(currentTrack) - 1
+                                  playTrack(tracks[prev])
+                              }
+                          }
+                      )
+                  }
+              }
+          }
+
+          @Composable
+          fun IPodLcdScreen(
+              modifier: Modifier,
+              currentScreen: ScreenState,
+              mainMenuOptions: List<String>,
+              menuIndex: Int,
+              tracks: List<Track>,
+              songIndex: Int,
+              currentTrack: Track?,
+              isPlaying: Boolean,
+              progress: Float
+          ) {
+              Box(
+                  modifier = modifier
+                      .shadow(6.dp, RoundedCornerShape(12.dp))
+                      .clip(RoundedCornerShape(12.dp))
+                      .background(Color(0xFFF4F6F0))
+                      .border(6.dp, Color(0xFF222222), RoundedCornerShape(12.dp))
+              ) {
+                  Column(modifier = Modifier.fillMaxSize()) {
+                      Row(
+                          modifier = Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color(0xFFE8ECEF), Color(0xFFCFD6DF)))).padding(horizontal = 12.dp, vertical = 6.dp),
+                          horizontalArrangement = Arrangement.SpaceBetween,
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          Text(
+                              text = when (currentScreen) {
+                                  ScreenState.MAIN_MENU -> "Shufl FM"
+                                  ScreenState.SONG_LIST -> "Songs"
+                                  ScreenState.NOW_PLAYING -> "Now Playing"
+                                  ScreenState.ABOUT -> "About"
+                              },
+                              fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Color.Black
+                          )
+                          Text(text = if (isPlaying) "▶" else "❚❚", fontSize = 13.sp, color = Color(0xFF1E66D0))
+                      }
+                      Divider(color = Color(0xFF888888), thickness = 1.dp)
+                      when (currentScreen) {
+                          ScreenState.MAIN_MENU -> Column(modifier = Modifier.fillMaxSize().padding(vertical = 4.dp)) {
+                              mainMenuOptions.forEachIndexed { idx, item ->
+                                  val selected = idx == menuIndex
+                                  Row(
+                                      modifier = Modifier.fillMaxWidth().background(
+                                          if (selected) Brush.verticalGradient(listOf(Color(0xFF3B93FF), Color(0xFF1665D8)))
+                                          else Brush.verticalGradient(listOf(Color.Transparent, Color.Transparent))
+                                      ).padding(horizontal = 12.dp, vertical = 7.dp),
+                                      horizontalArrangement = Arrangement.SpaceBetween
+                                  ) {
+                                      Text(item, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = if (selected) Color.White else Color.Black)
+                                      if (selected) Text(">", fontWeight = FontWeight.Bold, color = Color.White)
+                                  }
+                              }
+                          }
+                          ScreenState.SONG_LIST -> if (tracks.isEmpty()) {
+                              Box(modifier = Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
+                                  Text("No songs loaded.\nUse 'Import Audio Files' or 'Scan Device Music'.", color = Color.DarkGray, fontSize = 14.sp)
+                              }
+                          } else {
+                              val startIdx = (songIndex - 3).coerceAtLeast(0)
+                              val endIdx = (startIdx + 6).coerceAtMost(tracks.size)
+                              Column(modifier = Modifier.fillMaxSize().padding(vertical = 4.dp)) {
+                                  for (i in startIdx until endIdx) {
+                                      val selected = i == songIndex
+                                      Row(
+                                          modifier = Modifier.fillMaxWidth().background(
+                                              if (selected) Brush.verticalGradient(listOf(Color(0xFF3B93FF), Color(0xFF1665D8)))
+                                              else Brush.verticalGradient(listOf(Color.Transparent, Color.Transparent))
+                                          ).padding(horizontal = 12.dp, vertical = 6.dp)
+                                      ) {
+                                          Text(tracks[i].title, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (selected) Color.White else Color.Black)
+                                      }
+                                  }
+                              }
+                          }
+                          ScreenState.NOW_PLAYING -> Colum
